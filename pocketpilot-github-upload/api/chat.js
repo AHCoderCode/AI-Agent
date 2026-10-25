@@ -1,0 +1,167 @@
+const DEFAULT_MODEL = "gemini-3.8-flash";
+const SYSTEM_INSTRUCTION = [
+  "You are PocketPilot AI, a helpful website-based assistant.",
+  "Answer clearly, accurately, and honestly. Be concise unless the user asks for detail.",
+  "When Google Search is enabled for the request, use it for current facts and summarize relevant findings with source context.",
+  "This product runs in a normal website. You cannot control installed Android apps, phone settings, contacts, device files, calls, SMS, or the operating system. Never claim to have performed those actions.",
+  "Search and website actions are suggestions only. The browser UI asks the user to click before opening any URL.",
+  "Never claim an external action was completed unless the user actually clicks the provided action button."
+].join("\n");
+
+const rateWindows = new Map();
+
+function json(res, status, data) {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  return res.status(status).json(data);
+}
+
+function readBody(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+  if (typeof req.body === "string") {
+    try { return JSON.parse(req.body); } catch { return null; }
+  }
+  return null;
+}
+
+function limited(key) {
+  const now = Date.now();
+  const previous = rateWindows.get(key);
+  if (!previous || now - previous.start > 60_000) {
+    rateWindows.set(key, { start: now, count: 1 });
+    return false;
+  }
+  previous.count += 1;
+  if (rateWindows.size > 1000) {
+    for (const [client, item] of rateWindows) {
+      if (now - item.start > 60_000) rateWindows.delete(client);
+    }
+  }
+  return previous.count > 18;
+}
+
+function clientKey(req) {
+  const value = req.headers?.["x-forwarded-for"];
+  if (typeof value === "string" && value.trim()) return value.split(",")[0].trim();
+  return String(req.headers?.["x-real-ip"] || "unknown");
+}
+
+function requestedAction(message) {
+  const text = String(message || "").trim();
+  let match = text.match(/\b(?:search|find|look up)\s+(?:youtube\s+for|on youtube for)\s+(.+)/i)
+    || text.match(/\byoutube\s+(?:search|search for)\s+(.+)/i);
+  if (match?.[1]) {
+    const query = match[1].trim().replace(/[?.!]+$/, "");
+    return { label: "Open YouTube results", url: "https://www.youtube.com/results?search_query=" + encodeURIComponent(query) };
+  }
+  match = text.match(/\b(?:search|look up|find)\s+(?:the\s+)?(?:web|internet|google)\s+(?:for\s+)?(.+)/i)
+    || text.match(/\bgoogle\s+search\s+(?:for\s+)?(.+)/i);
+  if (match?.[1]) {
+    const query = match[1].trim().replace(/[?.!]+$/, "");
+    return { label: "Open Google results", url: "https://www.google.com/search?q=" + encodeURIComponent(query) };
+  }
+  match = text.match(/\bopen\s+(?:the\s+)?(?:website\s+)?(https?:\/\/[^\s]+|[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[^\s]*)?)/i);
+  if (match?.[1]) {
+    let raw = match[1].replace(/[),.;!?]+$/, "");
+    try {
+      if (!/^https?:\/\//i.test(raw)) raw = "https://" + raw;
+      const url = new URL(raw);
+      if (!url.hostname.includes(".") || url.hostname === "localhost") return null;
+      if (/^(127\.|10\.|192\.168\.|169\.254\.)/.test(url.hostname)) return null;
+      url.protocol = "https:";
+      return { label: "Open " + url.hostname, url: url.toString() };
+    } catch { return null; }
+  }
+  return null;
+}
+
+function needsWebSearch(message) {
+  if (/\b(?:youtube|video on youtube)\b/i.test(message)) return false;
+  return /\b(?:search (?:the )?(?:web|internet|google)|look up online|latest|current|today|yesterday|this week|news|weather|forecast|exchange rate|stock price|price of|recently|right now)\b/i.test(message);
+}
+
+function buildContents(history, message) {
+  const contents = [];
+  const recent = Array.isArray(history) ? history.slice(-12) : [];
+  for (const entry of recent) {
+    if (!entry || typeof entry.content !== "string") continue;
+    const text = entry.content.trim().slice(0, 6000);
+    if (!text) continue;
+    contents.push({
+      role: entry.role === "assistant" || entry.role === "model" ? "model" : "user",
+      parts: [{ text }]
+    });
+  }
+  contents.push({ role: "user", parts: [{ text: message }] });
+  return contents;
+}
+
+export default async function handler(req, res) {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST");
+    return json(res, 405, { ok: false, error: "method_not_allowed", message: "Use POST for chat requests." });
+  }
+  if (limited(clientKey(req))) {
+    return json(res, 429, { ok: false, error: "rate_limited", message: "Too many messages in a short period. Wait about a minute and try again." });
+  }
+
+  const body = readBody(req);
+  const message = typeof body?.message === "string" ? body.message.trim() : "";
+  if (!message) return json(res, 400, { ok: false, error: "empty_message", message: "Type a message first." });
+  if (message.length > 6000) return json(res, 413, { ok: false, error: "message_too_long", message: "Please keep each message under 6,000 characters." });
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return json(res, 503, { ok: false, error: "missing_api_key", message: "Gemini is not connected yet. Add GEMINI_API_KEY in Vercel → Settings → Environment Variables, then redeploy." });
+  }
+  const model = (process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();
+  if (!/^[a-zA-Z0-9._-]+$/.test(model)) return json(res, 500, { ok: false, error: "invalid_model", message: "GEMINI_MODEL contains invalid characters." });
+
+  const payload = {
+    systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+    contents: buildContents(body.history, message),
+    generationConfig: { temperature: 0.5, maxOutputTokens: 2048 }
+  };
+  const useSearch = needsWebSearch(message);
+  if (useSearch) payload.tools = [{ google_search: {} }];
+
+  let timeout;
+  try {
+    const controller = new AbortController();
+    timeout = setTimeout(() => controller.abort(), 38_000);
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent",
+      { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey }, body: JSON.stringify(payload), signal: controller.signal }
+    );
+    let data = {};
+    try { data = await response.json(); } catch { data = {}; }
+    if (!response.ok) {
+      if (response.status === 429) return json(res, 429, { ok: false, error: "gemini_quota", message: "Gemini has reached a rate limit or quota. Check API usage in Google AI Studio and try again later." });
+      if (response.status === 401 || response.status === 403) return json(res, 502, { ok: false, error: "gemini_auth", message: "Google rejected the Gemini API key. Check that the key is active and Gemini API access is enabled." });
+      if (response.status === 404) return json(res, 502, { ok: false, error: "gemini_model", message: "The Gemini model was not found. Set GEMINI_MODEL to gemini-3.8-flash or remove that variable to use the default." });
+      return json(res, 502, { ok: false, error: "gemini_request_failed", message: "Gemini returned HTTP " + response.status + ". Check the Vercel function logs for details." });
+    }
+
+    const candidate = data?.candidates?.[0];
+    const reply = candidate?.content?.parts?.map(part => typeof part.text === "string" ? part.text : "").filter(Boolean).join("\n").trim();
+    if (!reply) return json(res, 502, { ok: false, error: "empty_model_reply", message: "Gemini returned no text. Please rephrase your message and try again." });
+
+    const sources = [];
+    const seen = new Set();
+    for (const chunk of candidate?.groundingMetadata?.groundingChunks || []) {
+      const web = chunk?.web;
+      if (!web?.uri || !/^https:\/\//i.test(web.uri) || seen.has(web.uri)) continue;
+      seen.add(web.uri);
+      sources.push({ title: String(web.title || "Source").slice(0, 180), url: web.uri });
+      if (sources.length >= 6) break;
+    }
+    return json(res, 200, { ok: true, reply, action: requestedAction(message), sources, model, usedGoogleSearch: useSearch });
+  } catch (error) {
+    if (error?.name === "AbortError") return json(res, 504, { ok: false, error: "gemini_timeout", message: "Gemini took too long to reply. Try again." });
+    return json(res, 502, { ok: false, error: "upstream_unavailable", message: "PocketPilot could not reach Gemini. Check your internet connection and try again." });
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
