@@ -46,6 +46,73 @@ function clientKey(req) {
   return String(req.headers?.["x-real-ip"] || "unknown");
 }
 
+function directWebsiteAction(message) {
+  const text = String(message || "").trim();
+  const match = text.match(/^(?:please\\s+)?(?:open|visit|go to|navigate to|launch)\\s+(?:(?:the|a)\\s+)?(?:website\\s+)?(.+?)[.!?]*$/i);
+  if (!match?.[1]) return null;
+
+  const target = match[1].trim().replace(/\\s+website$/i, "").replace(/[.!?,;]+$/, "").trim().toLowerCase();
+  const sites = {
+    "youtube": ["YouTube", "https://www.youtube.com/"],
+    "you tube": ["YouTube", "https://www.youtube.com/"],
+    "youtube.com": ["YouTube", "https://www.youtube.com/"],
+    "google": ["Google", "https://www.google.com/"],
+    "google.com": ["Google", "https://www.google.com/"],
+    "github": ["GitHub", "https://github.com/"],
+    "github.com": ["GitHub", "https://github.com/"],
+    "wikipedia": ["Wikipedia", "https://www.wikipedia.org/"],
+    "wikipedia.org": ["Wikipedia", "https://www.wikipedia.org/"],
+    "reddit": ["Reddit", "https://www.reddit.com/"],
+    "reddit.com": ["Reddit", "https://www.reddit.com/"],
+    "stack overflow": ["Stack Overflow", "https://stackoverflow.com/"],
+    "stackoverflow": ["Stack Overflow", "https://stackoverflow.com/"],
+    "stackoverflow.com": ["Stack Overflow", "https://stackoverflow.com/"],
+    "chatgpt": ["ChatGPT", "https://chatgpt.com/"],
+    "openai": ["OpenAI", "https://openai.com/"],
+    "instagram": ["Instagram", "https://www.instagram.com/"],
+    "facebook": ["Facebook", "https://www.facebook.com/"],
+    "twitter": ["X", "https://x.com/"],
+    "x": ["X", "https://x.com/"],
+    "tiktok": ["TikTok", "https://www.tiktok.com/"],
+    "discord": ["Discord", "https://discord.com/app"],
+    "spotify": ["Spotify", "https://open.spotify.com/"],
+    "netflix": ["Netflix", "https://www.netflix.com/"],
+    "amazon": ["Amazon", "https://www.amazon.com/"],
+    "w3schools": ["W3Schools", "https://www.w3schools.com/"],
+    "mdn": ["MDN Web Docs", "https://developer.mozilla.org/"],
+    "vercel": ["Vercel", "https://vercel.com/"],
+    "roblox": ["Roblox", "https://www.roblox.com/"],
+    "gmail": ["Gmail", "https://mail.google.com/"],
+    "google ai studio": ["Google AI Studio", "https://aistudio.google.com/"],
+    "aistudio.google.com": ["Google AI Studio", "https://aistudio.google.com/"],
+    "canva": ["Canva", "https://www.canva.com/"],
+    "linkedin": ["LinkedIn", "https://www.linkedin.com/"],
+    "outlook": ["Outlook", "https://outlook.live.com/mail/"],
+    "bing": ["Bing", "https://www.bing.com/"],
+    "duckduckgo": ["DuckDuckGo", "https://duckduckgo.com/"],
+    "pinterest": ["Pinterest", "https://www.pinterest.com/"],
+    "twitch": ["Twitch", "https://www.twitch.tv/"],
+    "google drive": ["Google Drive", "https://drive.google.com/"],
+    "google docs": ["Google Docs", "https://docs.google.com/"],
+    "google classroom": ["Google Classroom", "https://classroom.google.com/"],
+    "google maps": ["Google Maps", "https://maps.google.com/"]
+  };
+  const site = sites[target];
+  if (site) return { label: "Open " + site[0], url: site[1] };
+
+  // Also support explicit HTTPS URLs or ordinary public domain names.
+  let raw = target;
+  if (!/^https?:\\/\\//i.test(raw) && /^[a-z0-9-]+(?:\\.[a-z0-9-]+)+(?:\\/[^\\s]*)?$/i.test(raw)) raw = "https://" + raw;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" || !url.hostname.includes(".") || url.hostname === "localhost") return null;
+    if (/^(127\\.|10\\.|192\\.168\\.|169\\.254\\.)/i.test(url.hostname)) return null;
+    return { label: "Open " + url.hostname, url: url.toString() };
+  } catch {
+    return null;
+  }
+}
+
 function requestedAction(message) {
   const text = String(message || "").trim();
   let match = text.match(/\b(?:search|find|look up)\s+(?:youtube\s+for|on youtube for)\s+(.+)/i)
@@ -111,6 +178,20 @@ export default async function handler(req, res) {
   const message = typeof body?.message === "string" ? body.message.trim() : "";
   if (!message) return json(res, 400, { ok: false, error: "empty_message", message: "Type a message first." });
   if (message.length > 6000) return json(res, 413, { ok: false, error: "message_too_long", message: "Please keep each message under 6,000 characters." });
+
+  // Website-opening commands are deterministic: do not wait for Gemini to answer them.
+  const directAction = directWebsiteAction(message);
+  if (directAction) {
+    const siteName = directAction.label.replace(/^Open\\s+/, "");
+    return json(res, 200, {
+      ok: true,
+      reply: "Tap the button below to open " + siteName + ".",
+      action: directAction,
+      sources: [],
+      model: "direct-action",
+      usedGoogleSearch: false
+    });
+  }
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
