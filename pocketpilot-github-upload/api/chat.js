@@ -122,7 +122,7 @@ export default async function handler(req, res) {
   const payload = {
     systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
     contents: buildContents(body.history, message),
-    generationConfig: { temperature: 0.5, maxOutputTokens: 2048 }
+    generationConfig: { maxOutputTokens: 2048 }
   };
   const useSearch = needsWebSearch(message);
   if (useSearch) payload.tools = [{ google_search: {} }];
