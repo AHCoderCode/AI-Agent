@@ -131,16 +131,27 @@ export default async function handler(req, res) {
   try {
     const controller = new AbortController();
     timeout = setTimeout(() => controller.abort(), 38_000);
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent",
-      { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey }, body: JSON.stringify(payload), signal: controller.signal }
-    );
+    const endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + encodeURIComponent(model) + ":generateContent";
+    const requestOptions = {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    };
+    let response;
     let data = {};
-    try { data = await response.json(); } catch { data = {}; }
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      response = await fetch(endpoint, requestOptions);
+      try { data = await response.json(); } catch { data = {}; }
+      if (response.status !== 503 || attempt === 2) break;
+      const delayMs = 1000 * (2 ** attempt) + Math.floor(Math.random() * 250);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
     if (!response.ok) {
       if (response.status === 429) return json(res, 429, { ok: false, error: "gemini_quota", message: "Gemini has reached a rate limit or quota. Check API usage in Google AI Studio and try again later." });
       if (response.status === 401 || response.status === 403) return json(res, 502, { ok: false, error: "gemini_auth", message: "Google rejected the Gemini API key. Check that the key is active and Gemini API access is enabled." });
       if (response.status === 404) return json(res, 502, { ok: false, error: "gemini_model", message: "The Gemini model was not found. Set GEMINI_MODEL to gemini-3.8-flash or remove that variable to use the default." });
+      if (response.status === 503) return json(res, 503, { ok: false, error: "gemini_unavailable", message: "Gemini is temporarily overloaded or unavailable. PocketPilot retried the request; please try again shortly." });
       return json(res, 502, { ok: false, error: "gemini_request_failed", message: "Gemini returned HTTP " + response.status + ". Check the Vercel function logs for details." });
     }
 
