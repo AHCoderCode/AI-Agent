@@ -48,10 +48,10 @@ function clientKey(req) {
 
 function directWebsiteAction(message) {
   const text = String(message || "").trim();
-  const match = text.match(/^(?:please\\s+)?(?:open|visit|go to|navigate to|launch)\\s+(?:(?:the|a)\\s+)?(?:website\\s+)?(.+?)[.!?]*$/i);
+  const match = text.match(/^(?:please\s+)?(?:open|visit|go to|navigate to|launch)\s+(?:(?:the|a)\s+)?(?:website\s+)?(.+?)[.!?]*$/i);
   if (!match?.[1]) return null;
 
-  const target = match[1].trim().replace(/\\s+website$/i, "").replace(/[.!?,;]+$/, "").trim().toLowerCase();
+  const target = match[1].trim().replace(/\s+website$/i, "").replace(/[.!?,;]+$/, "").trim().toLowerCase();
   const sites = {
     "youtube": ["YouTube", "https://www.youtube.com/"],
     "you tube": ["YouTube", "https://www.youtube.com/"],
@@ -102,11 +102,11 @@ function directWebsiteAction(message) {
 
   // Also support explicit HTTPS URLs or ordinary public domain names.
   let raw = target;
-  if (!/^https?:\\/\\//i.test(raw) && /^[a-z0-9-]+(?:\\.[a-z0-9-]+)+(?:\\/[^\\s]*)?$/i.test(raw)) raw = "https://" + raw;
+  if (!/^https?:\/\//i.test(raw) && /^[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[^\s]*)?$/i.test(raw)) raw = "https://" + raw;
   try {
     const url = new URL(raw);
     if (url.protocol !== "https:" || !url.hostname.includes(".") || url.hostname === "localhost") return null;
-    if (/^(127\\.|10\\.|192\\.168\\.|169\\.254\\.)/i.test(url.hostname)) return null;
+    if (/^(127\.|10\.|192\.168\.|169\.254\.)/i.test(url.hostname)) return null;
     return { label: "Open " + url.hostname, url: url.toString() };
   } catch {
     return null;
@@ -182,7 +182,7 @@ export default async function handler(req, res) {
   // Website-opening commands are deterministic: do not wait for Gemini to answer them.
   const directAction = directWebsiteAction(message);
   if (directAction) {
-    const siteName = directAction.label.replace(/^Open\\s+/, "");
+    const siteName = directAction.label.replace(/^Open\s+/, "");
     return json(res, 200, {
       ok: true,
       reply: "Tap the button below to open " + siteName + ".",
